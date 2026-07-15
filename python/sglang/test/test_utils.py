@@ -937,6 +937,32 @@ def _wait_for_process_tree_exit(tree, timeout=120):
     return False
 
 
+def _kill_stale_sglang_orphans():
+    """Kill sglang processes orphaned by previous test runs (ppid == 1).
+
+    A crashed launch can leave a launcher or scheduler hung indefinitely
+    (>1h observed on GB300), squatting the port plan derived from ``--port``
+    and failing every later launch on the runner with "rpc_port ... is used
+    by a process already" — a wait of any length cannot outlive it. Orphans
+    are safe to kill in CI: any legitimate concurrent server (e.g. the
+    sibling servers of a PD-disagg test) is still a child of a live test
+    process, never of PID 1.
+    """
+    stale = []
+    for p in psutil.process_iter(["name", "ppid"]):
+        try:
+            if (p.info["name"] or "").startswith("sglang") and p.info["ppid"] == 1:
+                if p.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                p.kill()
+                stale.append(p)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if stale:
+        print(f"CI: killed stale sglang orphans: {[p.pid for p in stale]}")
+        psutil.wait_procs(stale, timeout=10)
+
+
 def popen_launch_server(
     model: str,
     base_url: str,
@@ -1037,6 +1063,14 @@ def popen_launch_server(
     # Track if offline mode was enabled for potential retry
     offline_enabled = env.get("HF_HUB_OFFLINE") == "1"
 
+    # A hung orphan from a previous run can squat this launch's port plan
+    # forever; clear such processes before the first attempt.
+    if is_in_ci():
+        try:
+            _kill_stale_sglang_orphans()
+        except Exception as e:
+            print(f"CI: stale orphan cleanup failed (non-fatal): {e}")
+
     # First launch attempt
     process = _launch_server_process(command, env, return_stdout_stderr, model)
     success, error_msg = _wait_for_server_health(process, base_url, api_key, timeout)
@@ -1057,7 +1091,10 @@ def popen_launch_server(
                 kill_process_tree(process.pid)
             else:
                 process.wait(timeout=5)
-            _wait_for_process_tree_exit(tree)
+            if not _wait_for_process_tree_exit(tree):
+                # Waiting didn't drain it — the leftovers are hung; kill the
+                # orphans directly so the retry's ports are actually free.
+                _kill_stale_sglang_orphans()
         except Exception as e:
             print(f"CI_OFFLINE: Error cleaning up failed offline process: {e}")
 
