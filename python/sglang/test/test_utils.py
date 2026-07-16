@@ -938,20 +938,33 @@ def _wait_for_process_tree_exit(tree, timeout=120):
 
 
 def _kill_stale_sglang_orphans():
-    """Kill sglang processes orphaned by previous test runs (ppid == 1).
+    """Kill sglang processes left behind by previous test runs.
 
-    A crashed launch can leave a launcher or scheduler hung indefinitely
-    (>1h observed on GB300), squatting the port plan derived from ``--port``
-    and failing every later launch on the runner with "rpc_port ... is used
-    by a process already" — a wait of any length cannot outlive it. Orphans
-    are safe to kill in CI: any legitimate concurrent server (e.g. the
-    sibling servers of a PD-disagg test) is still a child of a live test
-    process, never of PID 1.
+    A crashed or killed launch can leave a launcher or scheduler hung
+    indefinitely (>1h observed on GB300), squatting the port plan derived
+    from ``--port`` and failing every later launch on the runner with
+    "rpc_port ... is used by a process already" — a wait of any length
+    cannot outlive it. The leftovers are not always reparented to PID 1
+    (a hung launcher keeps its schedulers chained to it), so match by age
+    instead: any sglang-named process created before the current test
+    process is by definition not ours, while legitimate concurrent servers
+    (e.g. PD-disagg siblings) are always spawned after it.
     """
+    me = psutil.Process()
+    cutoff = me.create_time()
+    protected = {me.pid}
+    try:
+        protected.update(p.pid for p in me.parents())
+    except psutil.NoSuchProcess:
+        pass
     stale = []
-    for p in psutil.process_iter(["name", "ppid"]):
+    for p in psutil.process_iter(["name", "create_time"]):
         try:
-            if (p.info["name"] or "").startswith("sglang") and p.info["ppid"] == 1:
+            if (
+                (p.info["name"] or "").startswith("sglang")
+                and p.info["create_time"] < cutoff
+                and p.pid not in protected
+            ):
                 if p.status() == psutil.STATUS_ZOMBIE:
                     continue
                 p.kill()
