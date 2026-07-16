@@ -7,7 +7,7 @@ import torch
 from sglang.jit_kernel.diffusion.ltx2_qknorm_split_rope import (
     ltx2_qknorm_split_rope_cuda,
 )
-from sglang.test.ci.ci_register import register_cuda_ci
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 from sglang.utils import is_in_ci
 
 register_cuda_ci(
@@ -16,6 +16,7 @@ register_cuda_ci(
     runner_config="1-gpu-large",
     disabled="standalone benchmark",
 )
+register_amd_ci(est_time=30, stage="jit-kernel-benchmark", runner_config="amd")
 
 
 @dataclass(frozen=True)
